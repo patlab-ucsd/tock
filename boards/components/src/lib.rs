@@ -31,6 +31,7 @@ pub mod dac;
 pub mod date_time;
 pub mod debug_writer;
 pub mod dfrobot_rainfall_sensor;
+pub mod epaper_v2;
 pub mod eui64;
 pub mod flash;
 pub mod fm25cl;

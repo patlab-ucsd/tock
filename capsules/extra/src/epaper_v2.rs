@@ -63,7 +63,11 @@ impl<'a, S: hil::spi::SpiMasterDevice<'a>> EPaper<'a, S> {
         }
     }
 
-    pub fn init_screen(&self) {}
+    pub fn init_screen(&self) {
+        // @EDWARD: This will be called on the main loop so you can use this
+        // as a quick way for now to debug if everything is "hooked up" correctly
+        // and if the screen is working.
+    }
 
     fn send_sequence(&self, sequence: &[Command]) -> Result<(), ErrorCode> {
         Ok(())
