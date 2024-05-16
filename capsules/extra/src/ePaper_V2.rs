@@ -11,9 +11,9 @@ use kernel::utilities::cells::{MapCell, OptionalCell, TakeCell};
 use kernel::utilities::leasable_buffer::SubSliceMut;
 use kernel::ErrorCode;
 
-// ???
 pub const BUFFER_SIZE: usize = 1032;
 
+// TODO - check if these are correct.
 const WIDTH: usize = 800;
 const HEIGHT: usize = 480;
 
@@ -72,7 +72,7 @@ impl<'a, S: hil::spi::SpiMasterDevice<'a>> EPaper<'a, S> {
 
 impl<'a, S: hil::spi::SpiMasterDevice<'a>> hil::screen::ScreenSetup<'a> for EPaper<'a, S> {
     fn set_client(&self, client: &'a dyn hil::screen::ScreenSetupClient) {
-        // todo
+        self.setup_client.set(client);
     }
 
     fn set_resolution(&self, _resolution: (usize, usize)) -> Result<(), ErrorCode> {
