@@ -67,6 +67,11 @@ impl<'a, S: hil::spi::SpiMasterDevice<'a>> EPaper<'a, S> {
         // @EDWARD: This will be called on the main loop so you can use this
         // as a quick way for now to debug if everything is "hooked up" correctly
         // and if the screen is working.
+        kernel::debug!("init screen called");
+        let buf = self.buffer.take().unwrap();
+        buf[0] = 1;
+        buf[1] = 2;
+        self.spi.read_write_bytes(buf, None, 2).unwrap();
     }
 
     fn send_sequence(&self, sequence: &[Command]) -> Result<(), ErrorCode> {
@@ -168,4 +173,15 @@ impl<'a, S: hil::spi::SpiMasterDevice<'a>> hil::screen::Screen<'a> for EPaper<'a
 
 impl<'a, S: hil::spi::SpiMasterDevice<'a>> hil::i2c::I2CClient for EPaper<'a, S> {
     fn command_complete(&self, buffer: &'static mut [u8], _status: Result<(), hil::i2c::Error>) {}
+}
+
+impl<'a, S: hil::spi::SpiMasterDevice<'a>> hil::spi::SpiMasterClient for EPaper<'a, S> {
+    fn read_write_done(
+        &self,
+        mut _write: &'static mut [u8],
+        mut read: Option<&'static mut [u8]>,
+        _len: usize,
+        spi_status: Result<(), ErrorCode>,
+    ) {
+    }
 }
