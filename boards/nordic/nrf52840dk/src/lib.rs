@@ -729,9 +729,16 @@ pub unsafe fn start() -> (
     let epaper_v2_spi = components::spi::SpiMuxComponent::new(&base_peripherals.spim2)
         .finalize(components::spi_mux_component_static!(nrf52840::spi::SPIM));
 
-    let epaper_v2 =
-        components::epaper_v2::EPaperV2Component::new(epaper_v2_spi, &gpio_port[Pin::P1_04], true)
-            .finalize(components::epaper_v2_component_static!(nrf52840::spi::SPIM));
+    let epaper_v2 = components::epaper_v2::EPaperV2Component::new(
+        epaper_v2_spi,
+        &gpio_port[Pin::P1_04],
+        &gpio_port[Pin::P1_05],
+        true,
+    )
+    .finalize(components::epaper_v2_component_static!(
+        nrf52840::spi::SPIM,
+        nrf52840::gpio::GPIOPin
+    ));
 
     let screen = components::screen::ScreenComponent::new(
         board_kernel,

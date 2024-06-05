@@ -42,8 +42,9 @@ enum State {
     Write,
 }
 
-pub struct EPaper<'a, S: hil::spi::SpiMasterDevice<'a>> {
+pub struct EPaper<'a, S: hil::spi::SpiMasterDevice<'a>, G: hil::gpio::Output> {
     spi: &'a S,
+    gpio: &'a G,
     state: Cell<State>,
     client: OptionalCell<&'a dyn hil::screen::ScreenClient>,
     setup_client: OptionalCell<&'a dyn hil::screen::ScreenSetupClient>,
@@ -51,10 +52,16 @@ pub struct EPaper<'a, S: hil::spi::SpiMasterDevice<'a>> {
     write_buffer: MapCell<SubSliceMut<'static, u8>>,
 }
 
-impl<'a, S: hil::spi::SpiMasterDevice<'a>> EPaper<'a, S> {
-    pub fn new(spi: &'a S, buffer: &'static mut [u8], enable_charge_pump: bool) -> EPaper<'a, S> {
+impl<'a, S: hil::spi::SpiMasterDevice<'a>, G: hil::gpio::Output> EPaper<'a, S, G> {
+    pub fn new(
+        spi: &'a S,
+        gpio: &'a G,
+        buffer: &'static mut [u8],
+        enable_charge_pump: bool,
+    ) -> EPaper<'a, S, G> {
         EPaper {
             spi,
+            gpio,
             state: Cell::new(State::Idle),
             client: OptionalCell::empty(),
             setup_client: OptionalCell::empty(),
@@ -79,7 +86,9 @@ impl<'a, S: hil::spi::SpiMasterDevice<'a>> EPaper<'a, S> {
     }
 }
 
-impl<'a, S: hil::spi::SpiMasterDevice<'a>> hil::screen::ScreenSetup<'a> for EPaper<'a, S> {
+impl<'a, S: hil::spi::SpiMasterDevice<'a>, G: hil::gpio::Output> hil::screen::ScreenSetup<'a>
+    for EPaper<'a, S, G>
+{
     fn set_client(&self, client: &'a dyn hil::screen::ScreenSetupClient) {
         self.setup_client.set(client);
     }
@@ -127,7 +136,9 @@ impl<'a, S: hil::spi::SpiMasterDevice<'a>> hil::screen::ScreenSetup<'a> for EPap
 }
 
 // TODO
-impl<'a, S: hil::spi::SpiMasterDevice<'a>> hil::screen::Screen<'a> for EPaper<'a, S> {
+impl<'a, S: hil::spi::SpiMasterDevice<'a>, G: hil::gpio::Output> hil::screen::Screen<'a>
+    for EPaper<'a, S, G>
+{
     fn set_client(&self, client: &'a dyn hil::screen::ScreenClient) {
         self.client.set(client);
     }
@@ -171,11 +182,15 @@ impl<'a, S: hil::spi::SpiMasterDevice<'a>> hil::screen::Screen<'a> for EPaper<'a
     }
 }
 
-impl<'a, S: hil::spi::SpiMasterDevice<'a>> hil::i2c::I2CClient for EPaper<'a, S> {
+impl<'a, S: hil::spi::SpiMasterDevice<'a>, G: hil::gpio::Output> hil::i2c::I2CClient
+    for EPaper<'a, S, G>
+{
     fn command_complete(&self, buffer: &'static mut [u8], _status: Result<(), hil::i2c::Error>) {}
 }
 
-impl<'a, S: hil::spi::SpiMasterDevice<'a>> hil::spi::SpiMasterClient for EPaper<'a, S> {
+impl<'a, S: hil::spi::SpiMasterDevice<'a>, G: hil::gpio::Output> hil::spi::SpiMasterClient
+    for EPaper<'a, S, G>
+{
     fn read_write_done(
         &self,
         mut _write: &'static mut [u8],
