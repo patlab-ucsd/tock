@@ -76,6 +76,7 @@ use capsules_core::virtualizers::virtual_alarm::{MuxAlarm, VirtualMuxAlarm};
 use capsules_extra::net::ieee802154::MacAddress;
 use capsules_extra::net::ipv6::ip_utils::IPAddr;
 use kernel::component::Component;
+use kernel::hil::gpio::{Configure, Interrupt};
 use kernel::hil::led::LedLow;
 use kernel::hil::time::Counter;
 #[allow(unused_imports)]
@@ -725,7 +726,9 @@ pub unsafe fn start() -> (
     //-------------------------------------------------------------------------
     // Screen
     //-------------------------------------------------------------------------
-
+    gpio_port[Pin::P1_06].make_input();
+    gpio_port[Pin::P1_04].make_output();
+    gpio_port[Pin::P1_07].make_output();
     let epaper_v2_spi = components::spi::SpiMuxComponent::new(&base_peripherals.spim2)
         .finalize(components::spi_mux_component_static!(nrf52840::spi::SPIM));
 
@@ -734,10 +737,15 @@ pub unsafe fn start() -> (
         &gpio_port[Pin::P1_04],
         &gpio_port[Pin::P1_05],
         true,
+        &gpio_port[Pin::P1_06],
+        &gpio_port[Pin::P1_07],
+        mux_alarm,
     )
     .finalize(components::epaper_v2_component_static!(
         nrf52840::spi::SPIM,
-        nrf52840::gpio::GPIOPin
+        nrf52840::gpio::GPIOPin,
+        nrf52840::gpio::GPIOPin,
+        nrf52840::rtc::Rtc
     ));
 
     let screen = components::screen::ScreenComponent::new(
@@ -747,8 +755,6 @@ pub unsafe fn start() -> (
         Some(epaper_v2),
     )
     .finalize(components::screen_component_static!(1032));
-
-    epaper_v2.init_screen();
 
     //--------------------------------------------------------------------------
     // ONBOARD EXTERNAL FLASH
@@ -957,6 +963,8 @@ pub unsafe fn start() -> (
     debug!("Initialization complete. Entering main loop\r");
     debug!("{}", &*addr_of!(nrf52840::ficr::FICR_INSTANCE));
 
+    epaper_v2.test_init();
+    epaper_v2.init_screen();
     (
         board_kernel,
         platform,
