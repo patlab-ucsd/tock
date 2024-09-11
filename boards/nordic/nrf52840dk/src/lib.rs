@@ -76,7 +76,7 @@ use capsules_core::virtualizers::virtual_alarm::{MuxAlarm, VirtualMuxAlarm};
 use capsules_extra::net::ieee802154::MacAddress;
 use capsules_extra::net::ipv6::ip_utils::IPAddr;
 use kernel::component::Component;
-use kernel::hil::gpio::{Configure, Interrupt};
+use kernel::hil::gpio::Configure;
 use kernel::hil::led::LedLow;
 use kernel::hil::time::Counter;
 #[allow(unused_imports)]
@@ -736,7 +736,6 @@ pub unsafe fn start() -> (
         epaper_v2_spi,
         &gpio_port[Pin::P1_04],
         &gpio_port[Pin::P1_05],
-        true,
         &gpio_port[Pin::P1_06],
         &gpio_port[Pin::P1_07],
         mux_alarm,
@@ -965,11 +964,5 @@ pub unsafe fn start() -> (
 
     epaper_v2.test_init();
     epaper_v2.init_screen();
-    (
-        board_kernel,
-        platform,
-        chip,
-        nrf52840_peripherals,
-        mux_alarm,
-    )
+    (board_kernel, platform, chip, base_peripherals)
 }

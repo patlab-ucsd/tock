@@ -12,7 +12,6 @@
 
 use capsules_core::virtualizers::virtual_alarm::{MuxAlarm, VirtualMuxAlarm};
 use capsules_core::virtualizers::virtual_spi::VirtualSpiMasterDevice;
-use capsules_extra::usb::usbc_client::Client;
 use core::mem::MaybeUninit;
 use kernel::component::Component;
 use kernel::hil::spi::{SpiMaster, SpiMasterDevice};
@@ -60,7 +59,6 @@ pub struct EPaperV2Component<
     spi_device: &'static capsules_core::virtualizers::virtual_spi::MuxSpiMaster<'static, S>,
     gpio: &'static G,
     chip_select: S::ChipSelect,
-    use_charge_pump: bool,
     gpio_busy: &'static GI,
     gpio_reset: &'static G,
     mux_alarm: &'static MuxAlarm<'static, A>,
@@ -77,7 +75,6 @@ impl<
         spi_device: &'static capsules_core::virtualizers::virtual_spi::MuxSpiMaster<'static, S>,
         gpio: &'static G,
         chip_select: S::ChipSelect,
-        use_charge_pump: bool,
         gpio_busy: &'static GI,
         gpio_reset: &'static G,
         mux_alarm: &'static MuxAlarm<'static, A>,
@@ -86,7 +83,6 @@ impl<
             spi_device,
             gpio,
             chip_select,
-            use_charge_pump,
             gpio_busy,
             gpio_reset,
             mux_alarm,
@@ -143,7 +139,6 @@ impl<
                 eeink_spi,
                 self.gpio,
                 buffer,
-                self.use_charge_pump,
                 self.gpio_busy,
                 self.gpio_reset,
                 epaper_virtual_alarm,
