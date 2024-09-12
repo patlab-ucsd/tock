@@ -11,7 +11,7 @@ use kernel::utilities::cells::{OptionalCell, TakeCell};
 use kernel::utilities::leasable_buffer::SubSliceMut;
 use kernel::ErrorCode;
 
-pub const BUFFER_SIZE: usize = 1032;
+pub const BUFFER_SIZE: usize = 800;
 
 // TODO - check if these are correct.
 const WIDTH: usize = 800;
@@ -21,7 +21,7 @@ const HEIGHT: usize = 480;
 const OLD_IMAGE: [u8; BUFFER_SIZE] = [1; BUFFER_SIZE];
 const NEW_IMAGE: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Command {
     PanelSetting(u8),
     PowerSetting(u8, u8, u8, u8),
@@ -51,7 +51,7 @@ impl Command {
             Command::PowerOff => &[2],
             Command::PowerOn => &[4],
             Command::BoosterSoftStart(data0, data1, data2, data3) => {
-                &[5, data0, data1, data2, data3]
+                &[6, data0, data1, data2, data3]
             }
             Command::DeepSleep(data0) => &[7, data0],
             Command::DataStartTransmission1 => &[0x10],
@@ -62,11 +62,11 @@ impl Command {
             Command::PLLControl(data0) => &[0x30, data0],
             Command::VCOMDataIntervalSetting(data0, Some(data1)) => &[0x50, data0, data1],
             Command::VCOMDataIntervalSetting(data0, None) => &[0x50, data0],
-            Command::VCOMDCSetting(data0) => &[0x58, data0],
             Command::TCONSetting(data0) => &[0x60, data0],
             Command::ResolutionSetting(data0, data1, data2, data3) => {
                 &[0x61, data0, data1, data2, data3]
             }
+            Command::VCOMDCSetting(data0) => &[0x82, data0],
         };
 
         // Move the available region of the buffer to what is remaining after
@@ -82,6 +82,7 @@ impl Command {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum EInkTask {
     SendCommand(Command),
     SendImage(&'static [u8]),
@@ -103,7 +104,7 @@ pub struct EPaper<
     busy_gpio: &'a GI,
     gpio_reset: &'a G,
     alarm: &'a A,
-    task_queue: Cell<[Option<EInkTask>; 10]>,
+    task_queue: Cell<[Option<EInkTask>; 19]>,
 }
 
 const TASK_QUEUE_REPEAT_VALUE: Option<EInkTask> = None;
@@ -134,7 +135,7 @@ impl<
             busy_gpio,
             gpio_reset,
             alarm,
-            task_queue: Cell::new([TASK_QUEUE_REPEAT_VALUE; 10]),
+            task_queue: Cell::new([TASK_QUEUE_REPEAT_VALUE; 19]),
         }
     }
 
@@ -155,6 +156,7 @@ impl<
     fn check_busy(&self) -> bool {
         // check if busy; busy is active low
         if !self.busy_gpio.read() {
+            kernel::debug!("[EInk] Busy -- setting alarm for 200ms.");
             let now = self.alarm.now();
             let dt = self.alarm.ticks_from_ms(200);
             self.alarm.set_alarm(now, dt);
@@ -169,6 +171,7 @@ impl<
             return;
         }
 
+        // Pop the first task from the queue.
         let mut task_queue = self.task_queue.take();
         let task = task_queue[0].take();
         for i in 1..task_queue.len() {
@@ -185,6 +188,8 @@ impl<
                     self.send_command(command).unwrap();
                 }
                 EInkTask::SendImage(image) => {
+                    kernel::debug!("[EInk] Sending image.");
+                    self.cd_gpio.set();
                     self.buffer
                         .map(|buf| buf[0..image.len()].copy_from_slice(image));
 
@@ -193,8 +198,10 @@ impl<
                         .unwrap();
                 }
                 EInkTask::Reset => {
+                    kernel::debug!("[EInk] Resetting.");
                     self.gpio_reset.clear();
                     self.gpio_reset.set();
+                    self.do_next_task();
                 }
             }
         }
@@ -210,6 +217,8 @@ impl<
         self.enqueue_task(EInkTask::SendCommand(Command::PowerSetting(
             0x07, 0x17, 0x3f, 0x3f,
         )))?;
+
+        self.enqueue_task(EInkTask::SendCommand(Command::PowerOn))?;
 
         self.enqueue_task(EInkTask::SendCommand(Command::PanelSetting(0x3F)))?;
 
@@ -240,7 +249,8 @@ impl<
         self.enqueue_task(EInkTask::SendCommand(Command::DisplayRefresh))?;
 
         self.enqueue_task(EInkTask::SendCommand(Command::VCOMDataIntervalSetting(
-            0x50, None,
+            0x31,
+            Some(0x07),
         )))?;
 
         self.enqueue_task(EInkTask::SendCommand(Command::PowerOff))?;
@@ -251,6 +261,7 @@ impl<
     }
 
     pub fn send_command(&self, command: Command) -> Result<(), ErrorCode> {
+        kernel::debug!("[EInk] Sending command {:?}", command);
         let buffer = self.buffer.take().unwrap();
         let mut send_slice: SubSliceMut<'static, u8> = SubSliceMut::new(buffer);
         let result = command.encode(&mut send_slice);
@@ -276,6 +287,8 @@ impl<
 
     pub fn test_init(&self) {
         self.send_sequence().unwrap();
+        kernel::debug!("[EInk] Complete enqueuing tasks.");
+        self.do_next_task();
     }
 }
 
@@ -402,7 +415,7 @@ impl<
     ) {
         if self.pending_send.is_some() {
             let remaining_len = self.pending_send.take().unwrap();
-            write.copy_within(1..remaining_len, 0);
+            write.copy_within(1..(remaining_len + 1), 0);
 
             // Set CD high for data, low for command
             self.cd_gpio.set();
