@@ -7,20 +7,29 @@
 use core::cell::Cell;
 use kernel::hil;
 use kernel::hil::time::ConvertTicks;
-use kernel::utilities::cells::{OptionalCell, TakeCell};
+use kernel::utilities::cells::{MapCell, OptionalCell, TakeCell};
 use kernel::utilities::leasable_buffer::SubSliceMut;
 use kernel::ErrorCode;
-
-pub const BUFFER_SIZE: usize = 100;
 
 // TODO - check if these are correct.
 const WIDTH: usize = 800;
 const HEIGHT: usize = 480;
 
-const SEND_SIZE: usize = 100;
-// Black pixel is 0, white pixel is 1
-const OLD_IMAGE: [u8; SEND_SIZE] = [0; SEND_SIZE];
-const NEW_IMAGE: [u8; SEND_SIZE] = [0xFF; SEND_SIZE];
+pub const BUFFER_SIZE: usize = WIDTH / 8;
+
+type X = usize;
+type Y = usize;
+type WIDTH = usize;
+type HEIGHT = usize;
+
+#[derive(PartialEq)]
+enum EInkState {
+    InitInProgress,
+    Idle,
+    ReadyWrite(X, Y, WIDTH, HEIGHT),
+    WriteInProgress(SubSliceMut<'static, u8>, X, Y, WIDTH, HEIGHT, usize),
+    Off,
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Command {
@@ -107,7 +116,8 @@ pub struct EPaper<
     gpio_power: &'a G,
     alarm: &'a A,
     reset_inprogress: Cell<bool>,
-    task_queue: Cell<[Option<EInkTask>; 17]>,
+    task_queue: Cell<[Option<EInkTask>; 10]>,
+    state: MapCell<EInkState>,
 }
 
 const TASK_QUEUE_REPEAT_VALUE: Option<EInkTask> = None;
@@ -141,7 +151,8 @@ impl<
             gpio_power,
             alarm,
             reset_inprogress: Cell::new(false),
-            task_queue: Cell::new([TASK_QUEUE_REPEAT_VALUE; 17]),
+            task_queue: Cell::new([TASK_QUEUE_REPEAT_VALUE; 10]),
+            state: MapCell::new(EInkState::Off),
         }
     }
 
@@ -231,10 +242,61 @@ impl<
                     self.alarm.set_alarm(now, dt);
                 }
             }
+        } else {
+            if let EInkState::WriteInProgress(
+                buf_slice,
+                frame_x,
+                frame_y,
+                frame_width,
+                frame_height,
+                row_number,
+            ) = self.state.take().unwrap()
+            {}
         }
     }
 
-    pub fn send_sequence(&self) -> Result<(), ErrorCode> {
+    fn consecutive_send(
+        &self,
+        mut buf_slice: SubSliceMut<'static, u8>,
+        frame_x: usize,
+        frame_y: usize,
+        frame_width: usize,
+        frame_height: usize,
+        row_number: usize,
+    ) {
+        for x in 0..frame_width {
+            // outside the frame
+            if row_number < frame_y
+                || row_number >= frame_y + frame_height
+                || x < frame_x
+                || x >= frame_x + frame_width
+            {
+                buf_slice[x] = 0;
+            }
+        }
+
+        let mut send_data: &'static mut [u8] = buf_slice.take();
+
+        self.buffer.map(|buf| {
+            buf[0..frame_width].copy_from_slice(&mut send_data);
+        });
+
+        let remaining_data = SubSliceMut::new(&mut send_data[frame_width..]);
+        let _ = self.enqueue_task(EInkTask::SendImage(self.buffer.take().unwrap()));
+
+        self.state.replace(EInkState::WriteInProgress(
+            remaining_data,
+            frame_x,
+            frame_y,
+            frame_width,
+            frame_height,
+            row_number + 1,
+        ));
+    }
+
+    pub fn init_sequence(&self) -> Result<(), ErrorCode> {
+        self.state.replace(EInkState::InitInProgress);
+
         self.enqueue_task(EInkTask::Reset)?;
 
         self.enqueue_task(EInkTask::SendCommand(Command::PowerSetting(
@@ -249,8 +311,6 @@ impl<
 
         self.enqueue_task(EInkTask::SendCommand(Command::PanelSetting(0x1F)))?;
 
-        // self.enqueue_task(EInkTask::SendCommand(Command::PLLControl(0x6)))?;
-
         self.enqueue_task(EInkTask::SendCommand(Command::ResolutionSetting(
             0x03, 0x20, 0x01, 0xE0,
         )))?;
@@ -259,20 +319,15 @@ impl<
 
         self.enqueue_task(EInkTask::SendCommand(Command::TCONSetting(0x22)))?;
 
-        //  self.enqueue_task(EInkTask::SendCommand(Command::VCOMDCSetting(0x26)))?;
-
         self.enqueue_task(EInkTask::SendCommand(Command::VCOMDataIntervalSetting(
             0x10,
             Some(0x07),
         )))?;
 
-        self.enqueue_task(EInkTask::SendCommand(Command::DataStartTransmission1))?;
+        Ok(())
+    }
 
-        self.enqueue_task(EInkTask::SendImage(&OLD_IMAGE))?;
-
-        self.enqueue_task(EInkTask::SendCommand(Command::DisplayStartTransmission2))?;
-        self.enqueue_task(EInkTask::SendImage(&NEW_IMAGE))?;
-
+    fn complete_screen_write(&self) -> Result<(), ErrorCode> {
         self.enqueue_task(EInkTask::SendCommand(Command::DisplayRefresh))?;
 
         self.enqueue_task(EInkTask::SendCommand(Command::VCOMDataIntervalSetting(
@@ -283,7 +338,12 @@ impl<
         self.enqueue_task(EInkTask::SendCommand(Command::PowerOff))?;
 
         self.enqueue_task(EInkTask::SendCommand(Command::DeepSleep(0xa5)))?;
+        Ok(())
+    }
 
+    pub fn send_sequence(&self, buf: &'static [u8]) -> Result<(), ErrorCode> {
+        self.enqueue_task(EInkTask::SendCommand(Command::DisplayStartTransmission2))?;
+        self.enqueue_task(EInkTask::SendImage(buf))?;
         Ok(())
     }
 
@@ -313,7 +373,7 @@ impl<
     }
 
     pub fn test_init(&self) {
-        self.send_sequence().unwrap();
+        // self.send_sequence().unwrap();
         kernel::debug!("[EInk] Complete enqueuing tasks.");
         self.do_next_task();
     }
@@ -347,7 +407,6 @@ impl<
     }
 
     fn get_num_supported_resolutions(&self) -> usize {
-        // todo
         1
     }
 
@@ -360,12 +419,10 @@ impl<
     }
 
     fn get_num_supported_pixel_formats(&self) -> usize {
-        // todo
         1
     }
 
     fn get_supported_pixel_format(&self, index: usize) -> Option<hil::screen::ScreenPixelFormat> {
-        // todo
         match index {
             0 => Some(hil::screen::ScreenPixelFormat::Mono),
             _ => None,
@@ -373,7 +430,6 @@ impl<
     }
 }
 
-// TODO
 impl<
         'a,
         S: hil::spi::SpiMasterDevice<'a>,
@@ -400,16 +456,44 @@ impl<
 
     fn set_write_frame(
         &self,
-        _x: usize,
-        _y: usize,
-        _width: usize,
-        _height: usize,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
     ) -> Result<(), ErrorCode> {
-        Err(ErrorCode::NOSUPPORT)
+        let state = self.state.take().unwrap();
+        if state != EInkState::Idle {
+            if state != EInkState::InitInProgress {
+                self.init_sequence().unwrap();
+            }
+            self.state.replace(state);
+            return Err(ErrorCode::BUSY);
+        }
+
+        if x + width > WIDTH || y + height > HEIGHT {
+            self.state.replace(state);
+            return Err(ErrorCode::INVAL);
+        }
+
+        self.state
+            .replace(EInkState::ReadyWrite(x, y, width, height));
+
+        Ok(())
     }
 
-    fn write(&self, _data: SubSliceMut<'static, u8>, _continue: bool) -> Result<(), ErrorCode> {
-        Err(ErrorCode::NOSUPPORT)
+    fn write(&self, data: SubSliceMut<'static, u8>, _continue: bool) -> Result<(), ErrorCode> {
+        if let EInkState::ReadyWrite(frame_x, frame_y, frame_width, frame_height) =
+            self.state.take().unwrap()
+        {
+            if data.len() > frame_width * frame_height {
+                return Err(ErrorCode::SIZE);
+            }
+
+            self.enqueue_task(EInkTask::SendCommand(Command::DisplayStartTransmission2))?;
+
+            self.consecutive_send(data, frame_x, frame_y, frame_width, frame_height, 0)
+        }
+        Ok(())
     }
 
     fn set_brightness(&self, _brightness: u16) -> Result<(), ErrorCode> {
