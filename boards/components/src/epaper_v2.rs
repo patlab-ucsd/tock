@@ -57,10 +57,11 @@ pub struct EPaperV2Component<
     A: 'static + hil::time::Alarm<'static>,
 > {
     spi_device: &'static capsules_core::virtualizers::virtual_spi::MuxSpiMaster<'static, S>,
-    gpio: &'static G,
+    cd_gpio: &'static G,
     chip_select: S::ChipSelect,
     gpio_busy: &'static GI,
     gpio_reset: &'static G,
+    gpio_power: &'static G,
     mux_alarm: &'static MuxAlarm<'static, A>,
 }
 
@@ -73,18 +74,20 @@ impl<
 {
     pub fn new(
         spi_device: &'static capsules_core::virtualizers::virtual_spi::MuxSpiMaster<'static, S>,
-        gpio: &'static G,
+        cd_gpio: &'static G,
         chip_select: S::ChipSelect,
         gpio_busy: &'static GI,
         gpio_reset: &'static G,
+        gpio_power: &'static G,
         mux_alarm: &'static MuxAlarm<'static, A>,
     ) -> EPaperV2Component<S, G, GI, A> {
         EPaperV2Component {
             spi_device,
-            gpio,
+            cd_gpio,
             chip_select,
             gpio_busy,
             gpio_reset,
+            gpio_power,
             mux_alarm,
         }
     }
@@ -137,13 +140,15 @@ impl<
             .2
             .write(capsules_extra::epaper_v2::EPaper::new(
                 eeink_spi,
-                self.gpio,
+                self.cd_gpio,
                 buffer,
                 self.gpio_busy,
                 self.gpio_reset,
+                self.gpio_power,
                 epaper_virtual_alarm,
             ));
 
+        self.gpio_power.set();
         epaper_virtual_alarm.set_alarm_client(epaper_v2);
 
         gpio::Interrupt::set_client(self.gpio_busy, epaper_v2);

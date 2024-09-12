@@ -729,6 +729,7 @@ pub unsafe fn start() -> (
     gpio_port[Pin::P1_06].make_input();
     gpio_port[Pin::P1_04].make_output();
     gpio_port[Pin::P1_07].make_output();
+    gpio_port[Pin::P1_08].make_output();
     let epaper_v2_spi = components::spi::SpiMuxComponent::new(&base_peripherals.spim2)
         .finalize(components::spi_mux_component_static!(nrf52840::spi::SPIM));
 
@@ -738,6 +739,7 @@ pub unsafe fn start() -> (
         &gpio_port[Pin::P1_05],
         &gpio_port[Pin::P1_06],
         &gpio_port[Pin::P1_07],
+        &gpio_port[Pin::P1_08],
         mux_alarm,
     )
     .finalize(components::epaper_v2_component_static!(

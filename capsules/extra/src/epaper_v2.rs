@@ -11,15 +11,16 @@ use kernel::utilities::cells::{OptionalCell, TakeCell};
 use kernel::utilities::leasable_buffer::SubSliceMut;
 use kernel::ErrorCode;
 
-pub const BUFFER_SIZE: usize = 800;
+pub const BUFFER_SIZE: usize = 100;
 
 // TODO - check if these are correct.
 const WIDTH: usize = 800;
 const HEIGHT: usize = 480;
 
+const SEND_SIZE: usize = 100;
 // Black pixel is 0, white pixel is 1
-const OLD_IMAGE: [u8; BUFFER_SIZE] = [1; BUFFER_SIZE];
-const NEW_IMAGE: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
+const OLD_IMAGE: [u8; SEND_SIZE] = [0; SEND_SIZE];
+const NEW_IMAGE: [u8; SEND_SIZE] = [0xFF; SEND_SIZE];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Command {
@@ -103,8 +104,9 @@ pub struct EPaper<
     pending_send: OptionalCell<usize>,
     busy_gpio: &'a GI,
     gpio_reset: &'a G,
+    gpio_power: &'a G,
     alarm: &'a A,
-    task_queue: Cell<[Option<EInkTask>; 19]>,
+    task_queue: Cell<[Option<EInkTask>; 17]>,
 }
 
 const TASK_QUEUE_REPEAT_VALUE: Option<EInkTask> = None;
@@ -123,6 +125,7 @@ impl<
         buffer: &'static mut [u8],
         busy_gpio: &'a GI,
         gpio_reset: &'a G,
+        gpio_power: &'a G,
         alarm: &'a A,
     ) -> EPaper<'a, S, G, GI, A> {
         EPaper {
@@ -134,8 +137,9 @@ impl<
             pending_send: OptionalCell::empty(),
             busy_gpio,
             gpio_reset,
+            gpio_power,
             alarm,
-            task_queue: Cell::new([TASK_QUEUE_REPEAT_VALUE; 19]),
+            task_queue: Cell::new([TASK_QUEUE_REPEAT_VALUE; 17]),
         }
     }
 
@@ -164,6 +168,18 @@ impl<
         }
 
         false
+    }
+
+    fn tasks_complete(&self) -> bool {
+        let task_queue = self.task_queue.take();
+        let mut complete = false;
+        //   kernel::debug!("Task queue: {:?}", task_queue);
+        if task_queue[0].is_none() {
+            complete = true;
+        }
+
+        self.task_queue.set(task_queue);
+        return complete;
     }
 
     fn do_next_task(&self) {
@@ -210,19 +226,19 @@ impl<
     pub fn send_sequence(&self) -> Result<(), ErrorCode> {
         self.enqueue_task(EInkTask::Reset)?;
 
-        self.enqueue_task(EInkTask::SendCommand(Command::BoosterSoftStart(
-            0x17, 0x17, 0x27, 0x17,
+        self.enqueue_task(EInkTask::SendCommand(Command::PowerSetting(
+            0x07, 0x07, 0x3f, 0x3f,
         )))?;
 
-        self.enqueue_task(EInkTask::SendCommand(Command::PowerSetting(
-            0x07, 0x17, 0x3f, 0x3f,
+        self.enqueue_task(EInkTask::SendCommand(Command::BoosterSoftStart(
+            0x17, 0x17, 0x28, 0x17,
         )))?;
 
         self.enqueue_task(EInkTask::SendCommand(Command::PowerOn))?;
 
-        self.enqueue_task(EInkTask::SendCommand(Command::PanelSetting(0x3F)))?;
+        self.enqueue_task(EInkTask::SendCommand(Command::PanelSetting(0x1F)))?;
 
-        self.enqueue_task(EInkTask::SendCommand(Command::PLLControl(0x6)))?;
+        // self.enqueue_task(EInkTask::SendCommand(Command::PLLControl(0x6)))?;
 
         self.enqueue_task(EInkTask::SendCommand(Command::ResolutionSetting(
             0x03, 0x20, 0x01, 0xE0,
@@ -232,10 +248,10 @@ impl<
 
         self.enqueue_task(EInkTask::SendCommand(Command::TCONSetting(0x22)))?;
 
-        self.enqueue_task(EInkTask::SendCommand(Command::VCOMDCSetting(0x26)))?;
+        //  self.enqueue_task(EInkTask::SendCommand(Command::VCOMDCSetting(0x26)))?;
 
         self.enqueue_task(EInkTask::SendCommand(Command::VCOMDataIntervalSetting(
-            0x31,
+            0x10,
             Some(0x07),
         )))?;
 
@@ -272,7 +288,7 @@ impl<
 
         let send_len = send_slice.len();
         if send_len > 1 {
-            self.pending_send.set(send_len - 1);
+            self.pending_send.set(send_len);
         }
 
         // Set CD high for data, low for command
@@ -415,7 +431,7 @@ impl<
     ) {
         if self.pending_send.is_some() {
             let remaining_len = self.pending_send.take().unwrap();
-            write.copy_within(1..(remaining_len + 1), 0);
+            write.copy_within(1..remaining_len, 0);
 
             // Set CD high for data, low for command
             self.cd_gpio.set();
@@ -451,6 +467,10 @@ impl<
     > kernel::hil::time::AlarmClient for EPaper<'a, S, G, GI, A>
 {
     fn alarm(&self) {
-        self.do_next_task();
+        if !self.tasks_complete() {
+            self.do_next_task();
+        } else {
+            self.gpio_power.clear();
+        }
     }
 }
