@@ -106,6 +106,7 @@ pub struct EPaper<
     gpio_reset: &'a G,
     gpio_power: &'a G,
     alarm: &'a A,
+    reset_inprogress: Cell<bool>,
     task_queue: Cell<[Option<EInkTask>; 17]>,
 }
 
@@ -139,6 +140,7 @@ impl<
             gpio_reset,
             gpio_power,
             alarm,
+            reset_inprogress: Cell::new(false),
             task_queue: Cell::new([TASK_QUEUE_REPEAT_VALUE; 17]),
         }
     }
@@ -183,8 +185,15 @@ impl<
     }
 
     fn do_next_task(&self) {
+        // TODO - I don't like the logic flow here... what we need to do
+        // is to only mark as busy if the next task is not going to reset.
         if self.check_busy() {
-            return;
+            let task_queue = self.task_queue.take();
+            self.task_queue.set(task_queue);
+            if let Some(EInkTask::Reset) = task_queue[0] {
+            } else {
+                return;
+            }
         }
 
         // Pop the first task from the queue.
@@ -215,9 +224,11 @@ impl<
                 }
                 EInkTask::Reset => {
                     kernel::debug!("[EInk] Resetting.");
+                    self.reset_inprogress.set(true);
                     self.gpio_reset.clear();
-                    self.gpio_reset.set();
-                    self.do_next_task();
+                    let now = self.alarm.now();
+                    let dt = self.alarm.ticks_from_ms(200);
+                    self.alarm.set_alarm(now, dt);
                 }
             }
         }
@@ -467,7 +478,11 @@ impl<
     > kernel::hil::time::AlarmClient for EPaper<'a, S, G, GI, A>
 {
     fn alarm(&self) {
-        if !self.tasks_complete() {
+        if self.reset_inprogress.get() {
+            self.reset_inprogress.set(false);
+            self.gpio_reset.set();
+            self.do_next_task();
+        } else if !self.tasks_complete() {
             self.do_next_task();
         } else {
             self.gpio_power.clear();
