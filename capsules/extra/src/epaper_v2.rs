@@ -8,7 +8,7 @@ use core::cell::Cell;
 use kernel::hil;
 use kernel::hil::time::ConvertTicks;
 use kernel::utilities::cells::{MapCell, OptionalCell, TakeCell};
-use kernel::utilities::leasable_buffer::SubSliceMut;
+use kernel::utilities::leasable_buffer::{SubSlice, SubSliceMut};
 use kernel::ErrorCode;
 
 // TODO - check if these are correct.
@@ -230,7 +230,7 @@ impl<
                         .map(|buf| buf[0..image.len()].copy_from_slice(image));
 
                     self.spi
-                        .read_write_bytes(self.buffer.take().unwrap(), None, image.len())
+                        .read_write_bytes(SubSliceMut::new(self.buffer.take().unwrap()), None)
                         .unwrap();
                 }
                 EInkTask::Reset => {
@@ -365,9 +365,9 @@ impl<
         // Set CD high for data, low for command
         self.cd_gpio.clear();
         self.spi
-            .read_write_bytes(send_slice.take(), None, 1)
+            .read_write_bytes(send_slice, None)
             .map_err(|(err, buf, _)| {
-                self.buffer.replace(buf);
+                self.buffer.replace(buf.take());
                 err
             })
     }
@@ -519,24 +519,29 @@ impl<
 {
     fn read_write_done(
         &self,
-        write: &'static mut [u8],
-        _read: Option<&'static mut [u8]>,
-        _len: usize,
-        _spi_status: Result<(), ErrorCode>,
+        write: SubSliceMut<u8>,
+        _read: Option<SubSliceMut<u8>>,
+        _spi_status: Result<usize, ErrorCode>,
     ) {
-        if self.pending_send.is_some() {
-            let remaining_len = self.pending_send.take().unwrap();
-            write.copy_within(1..remaining_len, 0);
+        // THIS NEEDS TO BE IMPLEMENTED. THE RECENT
+        // SPI CHANGES CREATE ISSUES HERE WITH THE
+        // BORROW CHECKER. WE NEED TO KICK OFF A NEW
+        // TRANSACTION HERE TO COMPLETE THE EEINK SEND.
+        /*
+            if self.pending_send.is_some() {
+                let remaining_len = self.pending_send.take().unwrap();
+                write.copy_within(1..remaining_len, 0);
 
-            // Set CD high for data, low for command
-            self.cd_gpio.set();
-            self.spi
-                .read_write_bytes(write, None, remaining_len)
-                .unwrap();
-        } else {
-            self.buffer.replace(write);
-            self.do_next_task();
-        }
+                // Set CD high for data, low for command
+                self.cd_gpio.set();
+                self.spi
+                    .read_write_bytes(write, None, remaining_len)
+                    .unwrap();
+            } else {
+                self.buffer.replace(write);
+                self.do_next_task();
+            }
+        */
     }
 }
 
