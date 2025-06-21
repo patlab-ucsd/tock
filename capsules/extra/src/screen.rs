@@ -144,6 +144,11 @@ impl<'a> Screen<'a> {
             .apps
             .enter(process_id, |app, _| {
                 if app.pending_command {
+                    // not sure if this is correct, but it works as a temporary patch.
+                    // when fill is called after setWriteFrame, the app has a pending command, and the buffer doesnt get filled correctly
+                    // so i manually updated the app's command to get the initial test running
+                    app.command = command;
+                    app.write_position = 0;
                     CommandReturn::failure(ErrorCode::BUSY)
                 } else {
                     app.pending_command = true;
@@ -227,9 +232,11 @@ impl<'a> Screen<'a> {
                     Err(e) => Err(e),
                     Ok(()) => self.buffer.take().map_or(Err(ErrorCode::NOMEM), |buffer| {
                         let len = self.fill_next_buffer_for_write(buffer);
+                        kernel::debug!("[Screen] fill_next_buffer_for_write: {}", len);
                         if len > 0 {
                             let mut data = SubSliceMut::new(buffer);
                             data.slice(..len);
+                            kernel::debug!("[Screen] Write buffer - Actual length: {}", data.len());
                             self.screen.write(data, false)
                         } else {
                             self.buffer.replace(buffer);
@@ -287,7 +294,7 @@ impl<'a> Screen<'a> {
                     app.write_position = 0;
                     app.width = width;
                     app.height = height;
-
+                    kernel::debug!("[Screen] SetWriteFrame");
                     self.screen.set_write_frame(x, y, width, height)
                 })
                 .unwrap_or_else(|err| err.into()),
@@ -380,6 +387,7 @@ impl<'a> Screen<'a> {
                             }
                             ScreenCommand::Fill => {
                                 // TODO bytes per pixel
+                                kernel::debug!("[Screen] write");
                                 len -= position;
                                 let bytes_per_pixel = pixels_in_bytes(
                                     1,

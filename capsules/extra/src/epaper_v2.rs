@@ -10,12 +10,13 @@ use kernel::hil::time::ConvertTicks;
 use kernel::utilities::cells::{MapCell, OptionalCell, TakeCell};
 use kernel::utilities::leasable_buffer::{SubSlice, SubSliceMut};
 use kernel::ErrorCode;
+use kernel::static_init;
 
 // TODO - check if these are correct.
 const WIDTH: usize = 800;
 const HEIGHT: usize = 480;
 
-pub const BUFFER_SIZE: usize = WIDTH / 8;
+pub const BUFFER_SIZE: usize = WIDTH;
 
 type X = usize;
 type Y = usize;
@@ -29,6 +30,11 @@ enum EInkState {
     ReadyWrite(X, Y, WIDTH, HEIGHT),
     WriteInProgress(SubSliceMut<'static, u8>, X, Y, WIDTH, HEIGHT, usize),
     Off,
+}
+
+enum EInkFrameState {
+    ReadyWrite(X, Y, WIDTH, HEIGHT),
+    Off
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -110,14 +116,16 @@ pub struct EPaper<
     client: OptionalCell<&'a dyn hil::screen::ScreenClient>,
     setup_client: OptionalCell<&'a dyn hil::screen::ScreenSetupClient>,
     buffer: TakeCell<'static, [u8]>,
+    frame_buffer: TakeCell<'static, [u8; 800]>,
     pending_send: OptionalCell<usize>,
     busy_gpio: &'a GI,
     gpio_reset: &'a G,
     gpio_power: &'a G,
     alarm: &'a A,
     reset_inprogress: Cell<bool>,
-    task_queue: Cell<[Option<EInkTask>; 10]>,
+    task_queue: Cell<[Option<EInkTask>; 32]>,
     state: MapCell<EInkState>,
+    frame_state: MapCell<EInkFrameState>,
 }
 
 const TASK_QUEUE_REPEAT_VALUE: Option<EInkTask> = None;
@@ -145,27 +153,31 @@ impl<
             client: OptionalCell::empty(),
             setup_client: OptionalCell::empty(),
             buffer: TakeCell::new(buffer),
+            frame_buffer: TakeCell::empty(),
             pending_send: OptionalCell::empty(),
             busy_gpio,
             gpio_reset,
             gpio_power,
             alarm,
             reset_inprogress: Cell::new(false),
-            task_queue: Cell::new([TASK_QUEUE_REPEAT_VALUE; 10]),
+            task_queue: Cell::new([TASK_QUEUE_REPEAT_VALUE; 32]),
             state: MapCell::new(EInkState::Off),
+            frame_state: MapCell::new(EInkFrameState::Off),
         }
     }
 
     fn enqueue_task(&self, task: EInkTask) -> Result<(), ErrorCode> {
+        // kernel::debug!("[EInk] Enqueuing task: {:?}", task);
         let mut task_queue = self.task_queue.take();
         for i in 0..task_queue.len() {
             if task_queue[i].is_none() {
                 task_queue[i] = Some(task);
                 self.task_queue.set(task_queue);
+                kernel::debug!("[EInk] Task enqueued at index {}", i);
                 return Ok(());
             }
         }
-
+        kernel::debug!("[EInk] Task queue full - NOMEM error");
         self.task_queue.set(task_queue);
         Err(ErrorCode::NOMEM)
     }
@@ -198,42 +210,55 @@ impl<
     fn do_next_task(&self) {
         // TODO - I don't like the logic flow here... what we need to do
         // is to only mark as busy if the next task is not going to reset.
-        if self.check_busy() {
-            let task_queue = self.task_queue.take();
+        kernel::debug!("[EInk] Busy status: {}", self.check_busy());
+        kernel::debug!("[EInk] Processing task queue");
+
+        let mut task_queue = self.task_queue.take();
+
+        // Check if queue is empty
+        let task_opt = task_queue[0];
+
+        if task_opt.is_none() {
+            kernel::debug!("[EInk] No task to process.");
             self.task_queue.set(task_queue);
-            if let Some(EInkTask::Reset) = task_queue[0] {
-            } else {
+            return;
+        }
+
+        // If busy and next task is NOT Reset, skip
+        if self.check_busy() {
+            if !matches!(task_opt, Some(EInkTask::Reset)) {
+                kernel::debug!("[EInk] Display is busy, deferring non-reset task.");
+                self.task_queue.set(task_queue);
                 return;
             }
         }
 
-        // Pop the first task from the queue.
-        let mut task_queue = self.task_queue.take();
+        // Pop the first task
         let task = task_queue[0].take();
         for i in 1..task_queue.len() {
             task_queue[i - 1] = task_queue[i].take();
         }
-
         task_queue[task_queue.len() - 1] = None;
-
         self.task_queue.set(task_queue);
 
+        // Execute task
         if let Some(task) = task {
             match task {
                 EInkTask::SendCommand(command) => {
+                    kernel::debug!("[EInk] Task dequeued: {:?}", task);
                     self.send_command(command).unwrap();
                 }
                 EInkTask::SendImage(image) => {
                     kernel::debug!("[EInk] Sending image.");
                     self.cd_gpio.set();
-                    self.buffer
-                        .map(|buf| buf[0..image.len()].copy_from_slice(image));
-
+                    self.buffer.map(|buf| buf[0..image.len()].copy_from_slice(image));
                     self.spi
                         .read_write_bytes(SubSliceMut::new(self.buffer.take().unwrap()), None)
                         .unwrap();
+                    self.enqueue_task(EInkTask::SendCommand(Command::DisplayRefresh));
                 }
                 EInkTask::Reset => {
+                    kernel::debug!("[EInk] Task dequeued: {:?}", task);
                     kernel::debug!("[EInk] Resetting.");
                     self.reset_inprogress.set(true);
                     self.gpio_reset.clear();
@@ -251,7 +276,14 @@ impl<
                 frame_height,
                 row_number,
             ) = self.state.take().unwrap()
-            {}
+            {self.consecutive_send(
+                buf_slice,
+                frame_x,
+                frame_y,
+                frame_width,
+                frame_height,
+                row_number,          // row_number (start at 0)
+            );}
         }
     }
 
@@ -264,6 +296,8 @@ impl<
         frame_height: usize,
         row_number: usize,
     ) {
+        kernel::debug!("[EInk] Consecutive send - Row: {}, Frame dimensions: {}x{}", row_number, frame_width, frame_height);
+        kernel::debug!("[EInk] Buffer slice length: {}", buf_slice.len());
         for x in 0..frame_width {
             // outside the frame
             if row_number < frame_y
@@ -275,14 +309,12 @@ impl<
             }
         }
 
-        let mut send_data: &'static mut [u8] = buf_slice.take();
+        let mut buffer: &'static mut [u8] = buf_slice.take();
 
-        self.buffer.map(|buf| {
-            buf[0..frame_width].copy_from_slice(&mut send_data);
-        });
-
-        let remaining_data = SubSliceMut::new(&mut send_data[frame_width..]);
-        let _ = self.enqueue_task(EInkTask::SendImage(self.buffer.take().unwrap()));
+        let (send_slice, remaining_slice) = buffer.split_at_mut(frame_width);
+        let mut send_data: &'static mut [u8] = send_slice;
+        let remaining_data = SubSliceMut::new(remaining_slice);
+        let _ = self.enqueue_task(EInkTask::SendImage(send_data)); // line 317
 
         self.state.replace(EInkState::WriteInProgress(
             remaining_data,
@@ -295,6 +327,7 @@ impl<
     }
 
     pub fn init_sequence(&self) -> Result<(), ErrorCode> {
+        kernel::debug!("[EInk] Init sequence.");
         self.state.replace(EInkState::InitInProgress);
 
         self.enqueue_task(EInkTask::Reset)?;
@@ -324,6 +357,10 @@ impl<
             Some(0x07),
         )))?;
 
+        let now = self.alarm.now();
+        let dt = self.alarm.ticks_from_ms(200);
+        self.alarm.set_alarm(now, dt);
+
         Ok(())
     }
 
@@ -338,12 +375,16 @@ impl<
         self.enqueue_task(EInkTask::SendCommand(Command::PowerOff))?;
 
         self.enqueue_task(EInkTask::SendCommand(Command::DeepSleep(0xa5)))?;
+
+        let now = self.alarm.now();
+        let dt = self.alarm.ticks_from_ms(200);
+        self.alarm.set_alarm(now, dt);
         Ok(())
     }
 
     pub fn send_sequence(&self, buf: &'static [u8]) -> Result<(), ErrorCode> {
         self.enqueue_task(EInkTask::SendCommand(Command::DisplayStartTransmission2))?;
-        self.enqueue_task(EInkTask::SendImage(buf))?;
+        // self.enqueue_task(EInkTask::SendImage(buf))?;
         Ok(())
     }
 
@@ -461,6 +502,9 @@ impl<
         width: usize,
         height: usize,
     ) -> Result<(), ErrorCode> {
+        let frame_state = self.frame_state.take().unwrap();
+        self.frame_state.replace(EInkFrameState::ReadyWrite(x, y, width, height));
+
         let state = self.state.take().unwrap();
         if state != EInkState::Idle {
             if state != EInkState::InitInProgress {
@@ -475,25 +519,28 @@ impl<
             return Err(ErrorCode::INVAL);
         }
 
-        self.state
-            .replace(EInkState::ReadyWrite(x, y, width, height));
+        self.state.replace(EInkState::ReadyWrite(x, y, width, height));
 
         Ok(())
     }
 
     fn write(&self, data: SubSliceMut<'static, u8>, _continue: bool) -> Result<(), ErrorCode> {
-        if let EInkState::ReadyWrite(frame_x, frame_y, frame_width, frame_height) =
-            self.state.take().unwrap()
+        if let EInkFrameState::ReadyWrite(frame_x, frame_y, frame_width, frame_height) =
+            self.frame_state.take().unwrap()
         {
+            kernel::debug!("[EInk] Write buffer - Actual length: {}", data.len());
             if data.len() > frame_width * frame_height {
                 return Err(ErrorCode::SIZE);
             }
 
             self.enqueue_task(EInkTask::SendCommand(Command::DisplayStartTransmission2))?;
-
-            self.consecutive_send(data, frame_x, frame_y, frame_width, frame_height, 0)
+            
+            self.consecutive_send(data, frame_x, frame_y, frame_width, frame_height, 0);
+            self.frame_state.replace(EInkFrameState::ReadyWrite(frame_x, frame_y, frame_width, frame_height));
         }
-        Ok(())
+        // this return is very sketchy. not sure why, but returning an error here allows the app to continue
+        // but keeping it Ok(()) (which is the expected behaviour), halts the app indefinitely
+        return Err(ErrorCode::BUSY);
     }
 
     fn set_brightness(&self, _brightness: u16) -> Result<(), ErrorCode> {
@@ -519,29 +566,30 @@ impl<
 {
     fn read_write_done(
         &self,
-        write: SubSliceMut<u8>,
-        _read: Option<SubSliceMut<u8>>,
-        _spi_status: Result<usize, ErrorCode>,
+        write_buffer: SubSliceMut<'static, u8>,
+        _read_buffer: Option<SubSliceMut<'static, u8>>,
+        _status: Result<usize, ErrorCode>,
     ) {
-        // THIS NEEDS TO BE IMPLEMENTED. THE RECENT
-        // SPI CHANGES CREATE ISSUES HERE WITH THE
-        // BORROW CHECKER. WE NEED TO KICK OFF A NEW
-        // TRANSACTION HERE TO COMPLETE THE EEINK SEND.
-        /*
-            if self.pending_send.is_some() {
-                let remaining_len = self.pending_send.take().unwrap();
-                write.copy_within(1..remaining_len, 0);
-
-                // Set CD high for data, low for command
-                self.cd_gpio.set();
-                self.spi
-                    .read_write_bytes(write, None, remaining_len)
-                    .unwrap();
-            } else {
-                self.buffer.replace(write);
-                self.do_next_task();
+        if let Some(remaining_len) = self.pending_send.take() {
+            // We have a pending send, so we need to send the remaining data
+            let mut send_slice = write_buffer;
+            send_slice.slice(..remaining_len);
+            
+            // Set CD high for data
+            self.cd_gpio.set();
+            
+            // Start the next SPI transaction
+            if let Err((err, buf, _)) = self.spi.read_write_bytes(send_slice, None) {
+                // If there's an error, restore the buffer and handle the error
+                self.buffer.replace(buf.take());
+                kernel::debug!("[EInk] SPI error in read_write_done: {:?}", err);
             }
-        */
+        } else {
+            // No pending send, so we're done with this transaction
+            self.buffer.replace(write_buffer.take());
+            // Process the next task in the queue
+            self.do_next_task();
+        }
     }
 }
 
@@ -567,6 +615,7 @@ impl<
     > kernel::hil::time::AlarmClient for EPaper<'a, S, G, GI, A>
 {
     fn alarm(&self) {
+        kernel::debug!("[EInk] Alarm");
         if self.reset_inprogress.get() {
             self.reset_inprogress.set(false);
             self.gpio_reset.set();
@@ -575,6 +624,8 @@ impl<
             self.do_next_task();
         } else {
             self.gpio_power.clear();
+            kernel::debug!("[EInk] Task Queue Clear");
+            self.complete_screen_write();
         }
     }
 }

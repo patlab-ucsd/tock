@@ -736,7 +736,9 @@ pub unsafe fn start() -> (
     let epaper_v2 = components::epaper_v2::EPaperV2Component::new(
         epaper_v2_spi,
         &gpio_port[Pin::P1_04],
-        &gpio_port[Pin::P1_05],
+        kernel::hil::spi::cs::IntoChipSelect::<_, kernel::hil::spi::cs::ActiveLow>::into_cs(
+            &gpio_port[Pin::P1_05],
+        ),
         &gpio_port[Pin::P1_06],
         &gpio_port[Pin::P1_07],
         &gpio_port[Pin::P1_08],
@@ -964,7 +966,13 @@ pub unsafe fn start() -> (
     debug!("Initialization complete. Entering main loop\r");
     debug!("{}", &*addr_of!(nrf52840::ficr::FICR_INSTANCE));
 
-    epaper_v2.test_init();
-    epaper_v2.init_screen();
-    (board_kernel, platform, chip, base_peripherals)
+    // epaper_v2.test_init();
+    epaper_v2.init_sequence();
+    (
+        board_kernel,
+        platform,
+        chip,
+        nrf52840_peripherals,
+        mux_alarm,
+    )
 }
